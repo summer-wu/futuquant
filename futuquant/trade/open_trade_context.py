@@ -6,9 +6,141 @@ import datetime as dt
 from futuquant.common.open_context_base import OpenContextBase
 from futuquant.trade.trade_query import *
 from futuquant.trade.trade_response_handler import AsyncHandler_TrdSubAccPush
+class SubscriptionQuery:
+    """
+    Query Conversion for getting user's subscription information.
+    """
+    def __init__(self):
+        pass
+
+    @classmethod
+    def pack_sub_or_unsub_req(cls, code_list, subtype_list, is_sub, conn_id, is_first_push):
+
+        stock_tuple_list = []
+        for code in code_list:
+            ret_code, content = split_stock_str(code)
+            if ret_code != RET_OK:
+                return ret_code, content, None
+            market_code, stock_code = content
+            stock_tuple_list.append((market_code, stock_code))
+
+        from futuquant.common.pb.Qot_Sub_pb2 import Request
+
+        req = Request()
+        req.c2s.accIDList.append(0)
+
+        for market_code, stock_code in stock_tuple_list:
+            stock_inst = req.c2s.securityList.add()
+            stock_inst.code = stock_code
+            stock_inst.market = market_code
+        for subtype in subtype_list:
+            req.c2s.subTypeList.append(SUBTYPE_MAP[subtype])
+        req.c2s.isSubOrUnSub = is_sub
+        req.c2s.isFirstPush = is_first_push
+
+        return pack_pb_req(req, ProtoId.Qot_Sub, conn_id)
+
+    @classmethod
+    def pack_subscribe_req(cls, code_list, subtype_list, conn_id, is_first_push):
+        return SubscriptionQuery.pack_sub_or_unsub_req(code_list, subtype_list, True, conn_id, is_first_push)
+
+    @classmethod
+    def unpack_subscribe_rsp(cls, rsp_pb):
+
+        if rsp_pb.retType != RET_OK:
+            return RET_ERROR, rsp_pb.retMsg, None
+
+        return RET_OK, "", None
+
+    @classmethod
+    def pack_unsubscribe_req(cls, code_list, subtype_list, conn_id):
+
+        return SubscriptionQuery.pack_sub_or_unsub_req(code_list, subtype_list, False, conn_id, False)
+
+    @classmethod
+    def unpack_unsubscribe_rsp(cls, rsp_pb):
+        """Unpack the un-subscribed response"""
+        if rsp_pb.retType != RET_OK:
+            return RET_ERROR, rsp_pb.retMsg, None
+
+        return RET_OK, "", None
+
+    @classmethod
+    def pack_subscription_query_req(cls, is_all_conn, conn_id):
+
+        from futuquant.common.pb.Qot_GetSubInfo_pb2 import Request
+        req = Request()
+        req.c2s.isReqAllConn = is_all_conn
+
+        return pack_pb_req(req, ProtoId.Qot_GetSubInfo, conn_id)
+
+    @classmethod
+    def unpack_subscription_query_rsp(cls, rsp_pb):
+
+        if rsp_pb.retType != RET_OK:
+            return RET_ERROR, rsp_pb.retMsg, None
+        raw_sub_info = rsp_pb.s2c
+        result = {}
+        result['total_used'] = raw_sub_info.totalUsedQuota
+        result['remain'] = raw_sub_info.remainQuota
+        result['conn_sub_list'] = []
+        for conn_sub_info in raw_sub_info.connSubInfoList:
+            conn_sub_info_tmp = {}
+            conn_sub_info_tmp['used'] = conn_sub_info.usedQuota
+            conn_sub_info_tmp['is_own_conn'] = conn_sub_info.isOwnConnData
+            conn_sub_info_tmp['sub_list'] = []
+            for sub_info in conn_sub_info.subInfoList:
+                sub_info_tmp = {}
+                if sub_info.subType not in QUOTE.REV_SUBTYPE_MAP:
+                    logger.error("error subtype:{}".format(sub_info.subType))
+                    continue
+
+                sub_info_tmp['subtype'] = QUOTE.REV_SUBTYPE_MAP[sub_info.subType]
+                sub_info_tmp['code_list'] = []
+                for stock in sub_info.securityList:
+                    sub_info_tmp['code_list'].append(merge_qot_mkt_stock_str(int(stock.market), stock.code),)
+
+                conn_sub_info_tmp['sub_list'].append(sub_info_tmp)
+
+            result['conn_sub_list'].append(conn_sub_info_tmp)
+
+        return RET_OK, "", result
+
+    @classmethod
+    def pack_push_or_unpush_req(cls, accID, conn_id):
+        from futuquant.common.pb.Trd_SubAccPush_pb2 import Request
+        req = Request()
+        req.c2s.accIDList.append(accID)
+
+        return pack_pb_req(req, ProtoId.Trd_SubAccPush, conn_id)
+
+    @classmethod
+    def pack_push_req(cls, accID, conn_id):
+        return SubscriptionQuery.pack_push_or_unpush_req(accID, conn_id)
+
+    @classmethod
+    def pack_unpush_req(cls, code_list, subtype_list, conn_id, is_first_push=False):
+
+        return SubscriptionQuery.pack_push_or_unpush_req(code_list, subtype_list, False, conn_id, is_first_push)
+
+
+
 
 class OpenTradeContextBase(OpenContextBase):
     """Class for set context of HK stock trade"""
+
+    def subscribe(self,accID):
+        conn_id = self.get_async_conn_id()
+        ret_code, msg, push_req_str = SubscriptionQuery.pack_push_req(accID,conn_id)
+
+        if ret_code != RET_OK:
+            return RET_ERROR, msg
+
+        ret_code, msg = self._send_async_req(push_req_str)
+        if ret_code != RET_OK:
+            return RET_ERROR, msg
+
+        return RET_OK, None
 
     def __init__(self, trd_mkt, host="127.0.0.1", port=11111):
         self.__trd_mkt = trd_mkt
